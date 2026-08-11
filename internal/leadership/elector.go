@@ -305,6 +305,12 @@ func trySendWakeup(ctx context.Context, wakeupChan chan struct{}) {
 	}
 }
 
+// SetNotifier changes the notifier before startup, after database capability
+// detection. It must only be called while the elector is stopped.
+func (e *Elector) SetNotifier(notifier *notifier.Notifier) {
+	e.notifier = notifier
+}
+
 func (e *Elector) Start(ctx context.Context) error {
 	ctx, shouldStart, started, stopped := e.StartInit(ctx)
 	if !shouldStart {
