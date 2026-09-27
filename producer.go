@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -77,6 +78,8 @@ type producerConfig struct {
 	// are coming in via LISTEN/NOTIFY then fetches may be delayed as long as
 	// FetchPollInterval.
 	FetchCooldown time.Duration
+
+	FetchOnlyKnownKinds bool
 
 	// FetchPollInterval is the amount of time between periodic fetches for new
 	// jobs. Typically new jobs will be picked up ~immediately after insert via
@@ -198,6 +201,7 @@ type producer struct {
 	id              atomic.Int64 // atomic because it's written at startup and read during shutdown
 	exec            riverdriver.Executor
 	errorHandler    jobexecutor.ErrorHandler
+	fetchKind       []string // cached registered kinds, including aliases; nil disables filtering
 	fetchLimiter    *chanutil.DebouncedChan
 	metricEmitHooks []rivertype.HookMetricEmit // memoized hooks of type HookMetricEmit for reuse in dispatchWork
 	state           riverpilot.ProducerState
@@ -294,6 +298,17 @@ func (p *producer) StartWorkContext(fetchCtx, workCtx context.Context) error {
 	fetchCtx, shouldStart, started, stopped := p.StartInit(fetchCtx)
 	if !shouldStart {
 		return nil
+	}
+
+	// Workers can be registered after the client is constructed, so capture
+	// kinds at startup. Keep an empty registry non-nil to avoid fetching all kinds.
+	p.fetchKind = nil
+	if p.config.FetchOnlyKnownKinds {
+		p.fetchKind = make([]string, 0, len(p.workers.workersMap))
+		for kind := range p.workers.workersMap {
+			p.fetchKind = append(p.fetchKind, kind)
+		}
+		slices.Sort(p.fetchKind)
 	}
 
 	isExpectedShutdownError := func(err error) bool {
@@ -835,6 +850,7 @@ func (p *producer) dispatchWork(workCtx context.Context, count int, fetchResultC
 
 	jobs, err := p.pilot.JobGetAvailable(ctx, p.exec, p.state, &riverdriver.JobGetAvailableParams{
 		ClientID:       p.config.ClientID,
+		Kind:           p.fetchKind,
 		MaxAttemptedBy: maxAttemptedBy,
 		MaxToLock:      count,
 		Now:            p.Time.NowOrNil(),
